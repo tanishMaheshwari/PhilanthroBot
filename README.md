@@ -49,7 +49,3 @@ ngo_profiles/
 ## Requirements
 
 See `requirements.txt` for Python package dependencies.
-
-## License
-
-Specify your license here.
