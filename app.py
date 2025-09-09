@@ -1,4 +1,5 @@
 import os
+from dotenv import load_dotenv
 import shutil
 import uuid
 from typing import List, Annotated, Dict
@@ -17,6 +18,7 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
 
+load_dotenv()  # Load environment variables from .env file
 # --- 1. SETUP AND CONFIGURATION ---
 # Ensure you have set the GOOGLE_API_KEY environment variable
 if 'GOOGLE_API_KEY' not in os.environ:
@@ -95,17 +97,28 @@ Top-rated by GiveWell for our effective interventions and cost-efficiency.
 
 def build_rag_pipeline():
     """
-    [cite_start]Builds the RAG pipeline by loading, splitting, and indexing documents[cite: 132].
+    Builds the RAG pipeline by loading, splitting, and indexing documents.
     Returns a retriever object.
     """
-    if os.path.exists(DB_DIR):
-        shutil.rmtree(DB_DIR)
+    # This function is now called from the main block, ensuring data exists.
+    if not os.path.exists(PROFILE_DIR):
+        print(f"Error: Profile directory '{PROFILE_DIR}' not found.")
+        return None
 
-    # [cite_start]Load documents from the directory [cite: 138]
+    # Load documents from the directory
     loader = DirectoryLoader(PROFILE_DIR, glob="**/*.md", loader_cls=TextLoader)
     documents = loader.load()
 
-    # [cite_start]Split documents into chunks using Markdown headers as separators [cite: 144, 153]
+    # --- ADD THIS CHECK ---
+    if not documents:
+        print("\n--- ERROR ---")
+        print(f"No documents were found in the '{PROFILE_DIR}' directory.")
+        print("Please ensure the dummy profiles were created correctly and the script has permission to read them.")
+        print("---------------")
+        exit() # Stop the script if no documents are loaded
+    # --- END OF CHECK ---
+
+    # Split documents into chunks using Markdown headers as separators
     text_splitter = RecursiveCharacterTextSplitter(
         chunk_size=1000,
         chunk_overlap=200,
@@ -113,7 +126,10 @@ def build_rag_pipeline():
     )
     chunks = text_splitter.split_documents(documents)
 
-    # [cite_start]Create embeddings and store in Chroma vector store [cite: 158, 163, 165]
+    # Create embeddings and store in Chroma vector store
+    if os.path.exists(DB_DIR):
+        shutil.rmtree(DB_DIR)
+        
     embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
     vector_store = Chroma.from_documents(
         documents=chunks,
@@ -121,14 +137,13 @@ def build_rag_pipeline():
         persist_directory=DB_DIR
     )
 
-    print("RAG pipeline built and indexed.")
+    print(f"RAG pipeline built: {len(documents)} document(s) loaded and indexed.")
     return vector_store.as_retriever()
-
 
 # --- 3. PHASE 2: STATEFUL AGENT WITH LANGGRAPH ---
 
 class UserPreferences(TypedDict):
-    [cite_start]"""Structure to hold the user's learned preferences[cite: 179]."""
+    """Structure to hold the user's learned preferences[cite: 179]."""
     causes: List[str]
     locations: List[str]
 

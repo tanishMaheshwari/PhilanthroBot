@@ -5,3 +5,5 @@ beautifulsoup4
 langchain-community
 chromadb
 pydantic
+python-dotenv
+pypdf
