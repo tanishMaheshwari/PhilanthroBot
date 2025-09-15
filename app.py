@@ -3,7 +3,7 @@ import shutil
 import uuid
 from dotenv import load_dotenv
 from typing import List, Annotated
-
+import time
 from langchain_core.documents import Document
 from langchain_core.messages import BaseMessage, HumanMessage
 from langchain.text_splitter import RecursiveCharacterTextSplitter
@@ -32,6 +32,8 @@ DB_DIR = "./chroma_db"
 
 # --- 2. PHASE 1: KNOWLEDGE BASE CONSTRUCTION (FOR PDFs) ---
 
+# ... (keep the rest of your imports)
+
 def build_rag_pipeline():
     """
     Builds the RAG pipeline by loading PDF files, splitting, and indexing them.
@@ -41,11 +43,10 @@ def build_rag_pipeline():
         print(f"Error: Profile directory '{PROFILE_DIR}' not found. Please create it and add your PDF files.")
         return None
 
-    # --- MODIFIED LOADER FOR PDFS ---
     loader = DirectoryLoader(
         PROFILE_DIR,
-        glob="**/*.pdf",         # Look for .pdf files
-        loader_cls=PyPDFLoader  # Use the PDF loader
+        glob="**/*.pdf",
+        loader_cls=PyPDFLoader
     )
     documents = loader.load()
 
@@ -56,27 +57,46 @@ def build_rag_pipeline():
         print("---------------")
         exit()
 
-    # Split documents into chunks
     text_splitter = RecursiveCharacterTextSplitter(
         chunk_size=1000,
         chunk_overlap=200
     )
     chunks = text_splitter.split_documents(documents)
+    print(f"Created {len(chunks)} document chunks.") # Good to know how many we're dealing with
 
-    # Create embeddings and store in Chroma vector store
     if os.path.exists(DB_DIR):
         shutil.rmtree(DB_DIR)
 
     embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
-    vector_store = Chroma.from_documents(
-        documents=chunks,
-        embedding=embeddings,
-        persist_directory=DB_DIR
-    )
+
+    # --- START OF MODIFIED SECTION ---
+    print("Embedding documents in batches to respect API rate limits...")
+    batch_size = 100 # A reasonable batch size for the free tier
+    vector_store = None # Initialize the vector store
+
+    for i in range(0, len(chunks), batch_size):
+        batch = chunks[i:i + batch_size]
+        print(f"Processing batch {i//batch_size + 1}/{(len(chunks) - 1)//batch_size + 1}...")
+
+        if vector_store is None:
+            # Create the store with the first batch
+            vector_store = Chroma.from_documents(
+                documents=batch,
+                embedding=embeddings,
+                persist_directory=DB_DIR
+            )
+        else:
+            # Add subsequent batches to the existing store
+            vector_store.add_documents(batch)
+        
+        # Add a delay between batches to avoid hitting the per-minute limit
+        time.sleep(1) # Wait for 5 seconds between batches
+
+    print("Finished embedding all documents.")
+    # --- END OF MODIFIED SECTION ---
 
     print(f"RAG pipeline built: {len(documents)} PDF document(s) loaded and indexed.")
     return vector_store.as_retriever()
-
 
 # --- 3. PHASE 2: STATEFUL AGENT WITH LANGGRAPH ---
 
@@ -93,7 +113,7 @@ class AgentState(TypedDict):
     latest_intent: str
 
 # Define the LLM and build the retriever
-llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash") # Using gemini-2.0-flash as it's a newer model
+llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash", temperature=0.5) # Using gemini-2.0-flash as it's a newer model
 retriever = None # Will be initialized in the main block
 
 # --- Graph Nodes (No changes needed here) ---
@@ -146,8 +166,26 @@ def retrieve_documents_node(state: AgentState):
     return {"retrieved_docs": docs}
 
 def generate_response_node(state: AgentState):
-    """Generates a conversational, grounded answer based on retrieved documents."""
-    prompt = ChatPromptTemplate.from_template(
+    """
+    Generates a response, adapting whether documents were retrieved or not.
+    """
+    question = state["messages"][-1].content
+    # Use .get() to safely access retrieved_docs, it returns None if the key doesn't exist
+    retrieved_docs = state.get("retrieved_docs")
+
+    if not retrieved_docs:
+        # If no documents are present, this is a general chat interaction
+        prompt = ChatPromptTemplate.from_template(
+            """You are PhilanthroBot, a helpful and friendly AI assistant.
+            Provide a simple, conversational response to the user's message.
+
+            User Message: {question}"""
+        )
+        chain = prompt | llm
+        response = chain.invoke({"question": question})
+    else:
+        # If documents were retrieved, perform RAG to answer the question
+        prompt = ChatPromptTemplate.from_template(
 """You are PhilanthroBot, a helpful AI assistant for discovering trustworthy NGOs.
 Answer the user's question based ONLY on the provided context. Be conversational and helpful.
 If the context doesn't contain the answer, state that you don't have enough information.
@@ -157,13 +195,12 @@ If the context doesn't contain the answer, state that you don't have enough info
 
 **User Question:**
 {question}"""
-    )
-    chain = prompt | llm
-    context = "\n\n".join([doc.page_content for doc in state["retrieved_docs"]])
-    question = state["messages"][-1].content
-    response = chain.invoke({"context": context, "question": question})
-    return {"messages": [response]}
+        )
+        chain = prompt | llm
+        context = "\n\n".join([doc.page_content for doc in retrieved_docs])
+        response = chain.invoke({"context": context, "question": question})
 
+    return {"messages": [response]}
 # --- Conditional Edges (No changes needed here) ---
 
 def route_after_classification(state: AgentState):
