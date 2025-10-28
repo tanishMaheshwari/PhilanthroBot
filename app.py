@@ -119,18 +119,55 @@ retriever = None # Will be initialized in the main block
 # --- Graph Nodes (No changes needed here) ---
 
 def classify_intent_node(state: AgentState):
-    """Analyzes the latest user message to determine its purpose."""
+    """
+    Analyzes the latest user message *in the context of the conversation* to determine its purpose.
+    """
+    
+    # Get the full message history, filtering out any System confirmation messages
+    messages = [msg for msg in state["messages"] if msg.name != "System"]
+    last_human_message = messages[-1].content
+    history_messages = messages[:-1]
+    
+    # Don't create history if it's the very first message
+    chat_history = ""
+    if history_messages:
+        chat_history = "\n".join([f"{msg.type}: {msg.content}" for msg in history_messages])
+
+    # Updated prompt that includes chat history and clearer instructions
     prompt = ChatPromptTemplate.from_template(
-        """Given the user's latest message, classify the intent:
-'preference_update', 'recommendation_request', 'question', 'greeting', 'goodbye'.
+        """Given the chat history and the user's latest message, classify the user's intent.
+Choose from one of the following single-word classifications: 
+'preference_update' - User is stating a new preference (e.g., "I care about animals", "I am in Mumbai")
+'recommendation_request' - User is asking for a new recommendation (e.g., "Find me an NGO")
+'question' - User is asking a follow-up question about a previous topic, a general question, or affirming a bot's question (e.g., "Tell me more", "What is Pratham?", "yes", "what is its name?")
+'greeting' - (e.g., "hi", "hello")
+'goodbye' - (e.g., "bye", "thanks that's all")
+
 Return only the single-word classification.
 
-User Message: {user_message}"""
+**Chat History:**
+{chat_history}
+
+**User Message:** {user_message}
+
+Classification:"""
     )
-    user_message = state["messages"][-1].content
+    
     chain = prompt | llm
-    intent = chain.invoke({"user_message": user_message}).content.strip()
+    
+    # Handle the case of the very first message where history is empty
+    if not chat_history:
+        chain_input = {"chat_history": "No history yet.", "user_message": last_human_message}
+    else:
+        chain_input = {"chat_history": chat_history, "user_message": last_human_message}
+        
+    intent = chain.invoke(chain_input).content.strip()
+    
+    # I've added a print statement so you can see the classification in your terminal
+    print(f"--- 0. CLASSIFIED INTENT: {intent} ---") 
+    
     return {"latest_intent": intent}
+
 
 def update_preferences_node(state: AgentState):
     """Parses the user's message to extract and store preferences."""
@@ -156,49 +193,111 @@ Return a JSON object with two keys: 'causes' and 'locations', listing any extrac
     }
 
 def retrieve_documents_node(state: AgentState):
-    """Constructs a query and retrieves relevant documents from the vector store."""
-    user_message = state["messages"][-1].content
+    """
+    Constructs a standalone query from the chat history and retrieves relevant documents.
+    """
+    print("--- 1. RETRIEVING DOCUMENTS ---")
+    
+    # Get the full message history
+    messages = state["messages"]
+    # Get the last human message
+    last_human_message = messages[-1].content
+    
+    # Get history *before* the last message
+    history_messages = messages[:-1]
+    chat_history = "\n".join([f"{msg.type}: {msg.content}" for msg in history_messages])
+
+    # 1. Create a query-rewriting prompt
+    # This prompt helps the LLM turn a follow-up question into a standalone query
+    query_gen_prompt = ChatPromptTemplate.from_template(
+        """Given the following conversation and a follow up question, rephrase the follow up question to be a standalone question, in its original language.
+
+Chat History:
+{chat_history}
+
+Follow Up Input: {input}
+
+Standalone question:"""
+    )
+    
+    # 2. Create the query-rewriting chain
+    query_gen_chain = query_gen_prompt | llm
+    
+    # 3. Generate the standalone query
+    generated_query = query_gen_chain.invoke({
+        "chat_history": chat_history,
+        "input": last_human_message
+    }).content
+
+    print(f"--- Generated Search Query: {generated_query} ---")
+    
+    # 4. Add preferences to the query (as you did before)
     prefs = state.get("preferences", {})
-    query = f"{user_message}"
-    if prefs.get("causes"): query += f" related to causes like {', '.join(prefs['causes'])}"
-    if prefs.get("locations"): query += f" in locations like {', '.join(prefs['locations'])}"
-    docs = retriever.invoke(query)
+    final_query = generated_query
+    if prefs.get("causes"): final_query += f" related to causes like {', '.join(prefs['causes'])}"
+    if prefs.get("locations"): final_query += f" in locations like {', '.join(prefs['locations'])}"
+
+    # 5. Retrieve documents with the new, standalone query
+    docs = retriever.invoke(final_query)
+    print(f"--- Retrieved {len(docs)} documents ---")
     return {"retrieved_docs": docs}
+
 
 def generate_response_node(state: AgentState):
     """
-    Generates a response, adapting whether documents were retrieved or not.
+    Generates a response, adapting whether documents were retrieved or not,
+    and now includes chat history for context.
     """
-    question = state["messages"][-1].content
-    # Use .get() to safely access retrieved_docs, it returns None if the key doesn't exist
+    print("--- 2. GENERATING RESPONSE ---")
+    
+    # Get the full message history, filtering out any System confirmation messages
+    messages = [msg for msg in state["messages"] if msg.name != "System"]
+    last_human_message = messages[-1].content
+    history_messages = messages[:-1]
+    chat_history = "\n".join([f"{msg.type}: {msg.content}" for msg in history_messages])
+
     retrieved_docs = state.get("retrieved_docs")
 
     if not retrieved_docs:
         # If no documents are present, this is a general chat interaction
+        print("--- Using General Chat Prompt ---")
         prompt = ChatPromptTemplate.from_template(
             """You are PhilanthroBot, a helpful and friendly AI assistant.
-            Provide a simple, conversational response to the user's message.
+            Provide a simple, conversational response based on the chat history.
 
-            User Message: {question}"""
+            **Chat History:**
+            {chat_history}
+            
+            **Human:** {input}
+            **AI:**"""
         )
         chain = prompt | llm
-        response = chain.invoke({"question": question})
+        response = chain.invoke({"chat_history": chat_history, "input": last_human_message})
     else:
         # If documents were retrieved, perform RAG to answer the question
+        print("--- Using RAG Prompt ---")
         prompt = ChatPromptTemplate.from_template(
 """You are PhilanthroBot, a helpful AI assistant for discovering trustworthy NGOs.
-Answer the user's question based ONLY on the provided context. Be conversational and helpful.
+Answer the user's latest question based on the **chat history** and the **provided context**.
+Be conversational and helpful.
 If the context doesn't contain the answer, state that you don't have enough information.
 
-**Context:**
+**Chat History:**
+{chat_history}
+
+**Context from Documents:**
 {context}
 
-**User Question:**
-{question}"""
+**Human:** {input}
+**AI:**"""
         )
         chain = prompt | llm
         context = "\n\n".join([doc.page_content for doc in retrieved_docs])
-        response = chain.invoke({"context": context, "question": question})
+        response = chain.invoke({
+            "context": context, 
+            "chat_history": chat_history, 
+            "input": last_human_message
+        })
 
     return {"messages": [response]}
 # --- Conditional Edges (No changes needed here) ---
