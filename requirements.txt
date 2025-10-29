@@ -9,3 +9,6 @@ pydantic
 python-dotenv
 pypdf
 streamlit
+ragas
+scikit-learn
+tqdm
