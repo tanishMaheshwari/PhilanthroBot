@@ -9,11 +9,13 @@ from langchain_core.messages import BaseMessage, HumanMessage
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 # --- MODIFIED IMPORT ---
 from langchain_community.document_loaders import DirectoryLoader, PyPDFLoader
-from langchain_community.vectorstores import Chroma
+# from langchain_community.vectorstores import Chroma
+from langchain_chroma import Chroma
 from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers.json import JsonOutputParser
 from langchain_core.runnables import RunnableConfig
+from langgraph.checkpoint.memory import MemorySaver
 
 from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
@@ -32,71 +34,63 @@ DB_DIR = "./chroma_db"
 
 # --- 2. PHASE 1: KNOWLEDGE BASE CONSTRUCTION (FOR PDFs) ---
 
-# ... (keep the rest of your imports)
+doc_embed = GoogleGenerativeAIEmbeddings(
+    model="gemini-embedding-001",
+    task_type="RETRIEVAL_DOCUMENT",
+    transport="rest",
+    request_options={"timeout": 20},
+)
+
+query_embed = GoogleGenerativeAIEmbeddings(
+    model="gemini-embedding-001",
+    task_type="RETRIEVAL_QUERY",
+    transport="rest",
+    request_options={"timeout": 20},
+)
+
+
 
 def build_rag_pipeline():
-    """
-    Builds the RAG pipeline by loading PDF files, splitting, and indexing them.
-    Returns a retriever object.
-    """
     if not os.path.exists(PROFILE_DIR):
-        print(f"Error: Profile directory '{PROFILE_DIR}' not found. Please create it and add your PDF files.")
+        print(f"Error: Profile directory '{PROFILE_DIR}' not found.")
         return None
 
-    loader = DirectoryLoader(
-        PROFILE_DIR,
-        glob="**/*.pdf",
-        loader_cls=PyPDFLoader
-    )
+    # Load documents and split
+    loader = DirectoryLoader(PROFILE_DIR, glob="**/*.pdf", loader_cls=PyPDFLoader)
     documents = loader.load()
-
-    if not documents:
-        print("\n--- ERROR ---")
-        print(f"No PDF documents were found in the '{PROFILE_DIR}' directory.")
-        print("Please ensure your PDF files are in the correct folder.")
-        print("---------------")
-        exit()
-
-    text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1000,
-        chunk_overlap=200
-    )
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
     chunks = text_splitter.split_documents(documents)
-    print(f"Created {len(chunks)} document chunks.") # Good to know how many we're dealing with
 
+    collection_name = "ngos_gemini001"  # keep per-model/dimension collections separate
+
+    # Reuse existing DB if present; else build it once
     if os.path.exists(DB_DIR):
-        shutil.rmtree(DB_DIR)
+        # Load for serving with the QUERY encoder
+        vector_store = Chroma(
+            persist_directory=DB_DIR,
+            collection_name=collection_name,
+            embedding_function=query_embed,
+        )
+    else:
+        # Build with the DOCUMENT encoder (first time)
+        vector_store = Chroma.from_documents(
+            documents=chunks,
+            embedding=doc_embed,
+            persist_directory=DB_DIR,
+            collection_name=collection_name,
+        )
+        # Re-open with QUERY encoder for serving consistency in this run
+        vector_store = Chroma(
+            persist_directory=DB_DIR,
+            collection_name=collection_name,
+            embedding_function=query_embed,
+        )
 
-    embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
+    # You can tune k or add metadata filters via search_kwargs later
+    return vector_store.as_retriever( search_type="mmr",
+    search_kwargs={"k": 6, "fetch_k": 60, "lambda_mult": 0.3},
+    )
 
-    # --- START OF MODIFIED SECTION ---
-    print("Embedding documents in batches to respect API rate limits...")
-    batch_size = 100 # A reasonable batch size for the free tier
-    vector_store = None # Initialize the vector store
-
-    for i in range(0, len(chunks), batch_size):
-        batch = chunks[i:i + batch_size]
-        print(f"Processing batch {i//batch_size + 1}/{(len(chunks) - 1)//batch_size + 1}...")
-
-        if vector_store is None:
-            # Create the store with the first batch
-            vector_store = Chroma.from_documents(
-                documents=batch,
-                embedding=embeddings,
-                persist_directory=DB_DIR
-            )
-        else:
-            # Add subsequent batches to the existing store
-            vector_store.add_documents(batch)
-        
-        # Add a delay between batches to avoid hitting the per-minute limit
-        time.sleep(1) # Wait for 5 seconds between batches
-
-    print("Finished embedding all documents.")
-    # --- END OF MODIFIED SECTION ---
-
-    print(f"RAG pipeline built: {len(documents)} PDF document(s) loaded and indexed.")
-    return vector_store.as_retriever()
 
 # --- 3. PHASE 2: STATEFUL AGENT WITH LANGGRAPH ---
 
@@ -113,7 +107,7 @@ class AgentState(TypedDict):
     latest_intent: str
 
 # Define the LLM and build the retriever
-llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash", temperature=0.5) # Using gemini-2.0-flash as it's a newer model
+llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.1) # Using gemini-2.0-flash as it's a newer model
 retriever = None # Will be initialized in the main block
 
 # --- Graph Nodes (No changes needed here) ---
@@ -327,7 +321,7 @@ def build_graph():
     workflow.add_edge("update_preferences", END)
     workflow.add_edge("retrieve_documents", "generate_response")
     workflow.add_edge("generate_response", END)
-    return workflow.compile()
+    return workflow
 
 
 # --- Main Interaction Loop ---
@@ -337,7 +331,11 @@ if __name__ == "__main__":
     retriever = build_rag_pipeline()
     
     if retriever:
-        app = build_graph()
+        checkpointer = MemorySaver()
+        builder = build_graph()
+        app = builder.compile(checkpointer=checkpointer)
+        # with open("graph.png", "wb") as f:
+        #     f.write(app.get_graph().draw_mermaid_png())
         print("\nPhilanthroBot is ready! How can I help you find an NGO to support?")
         thread_id = str(uuid.uuid4())
         config = RunnableConfig(configurable={"thread_id": thread_id})

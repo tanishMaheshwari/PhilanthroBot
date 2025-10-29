@@ -1,5 +1,6 @@
 langchain
 langchain-google-genai
+langchain-chroma
 langgraph
 beautifulsoup4
 langchain-community
