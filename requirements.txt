@@ -12,3 +12,7 @@ streamlit
 ragas
 scikit-learn
 tqdm
+pandas
+matplotlib
+seaborn
+ipykernel
