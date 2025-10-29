@@ -7,6 +7,15 @@ from collections import defaultdict
 from tqdm import tqdm
 
 # ============ Retrieval Metrics ============
+def _dedupe_preserve_order(seq):
+    seen = set()
+    out = []
+    for x in seq:
+        if x not in seen:
+            seen.add(x)
+            out.append(x)
+    return out
+
 
 def precision_at_k(retrieved_ids: List[str], relevant_ids: List[str], k: int) -> float:
     topk = retrieved_ids[:k]
@@ -76,6 +85,7 @@ def evaluate_retrieval(
         rel_ids = ex.get("relevant_ids", [])
         docs = retriever.invoke(q)
         ret_ids = [id_getter(d) for d in docs]
+        ret_ids = _dedupe_preserve_order(ret_ids)
 
         for k in k_values:
             metrics_sum[f"P@{k}"] += precision_at_k(ret_ids, rel_ids, k)
@@ -101,6 +111,9 @@ def write_dict_csv(path: str, rows: List[Dict[str, Any]]):
             w.writerow(r)
 
 # ============ RAGAS Metrics ============
+
+
+
 
 def evaluate_ragas(
     llm, retriever, dataset: List[Dict[str, Any]],

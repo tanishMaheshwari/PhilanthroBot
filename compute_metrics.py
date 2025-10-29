@@ -1,16 +1,13 @@
 import os
 import shutil
 import uuid
-import sys
 from dotenv import load_dotenv
 from typing import List, Annotated
 import time
 from langchain_core.documents import Document
 from langchain_core.messages import BaseMessage, HumanMessage
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-# --- MODIFIED IMPORT ---
 from langchain_community.document_loaders import DirectoryLoader, PyPDFLoader
-# from langchain_community.vectorstores import Chroma
 from langchain_chroma import Chroma
 from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
 from langchain_core.prompts import ChatPromptTemplate
@@ -34,16 +31,14 @@ from datasets import Dataset as HFDataset
 
 # --- 1. SETUP AND CONFIGURATION ---
 
-load_dotenv()  # Load environment variables from .env file
-# Ensure you have set the GOOGLE_API_KEY environment variable
+load_dotenv() 
+
 if 'GOOGLE_API_KEY' not in os.environ:
     raise ValueError("Please set the GOOGLE_API_KEY environment variable.")
 
-# Define directories
 PROFILE_DIR = "./ngo_profiles"
 DB_DIR = "./chroma_db"
 
-# --- 2. PHASE 1: KNOWLEDGE BASE CONSTRUCTION (FOR PDFs) ---
 
 doc_embed = GoogleGenerativeAIEmbeddings(
     model="gemini-embedding-001",
@@ -292,19 +287,19 @@ def generate_response_node(state: AgentState):
         # If documents were retrieved, perform RAG to answer the question
         print("--- Using RAG Prompt ---")
         prompt = ChatPromptTemplate.from_template(
-"""You are PhilanthroBot, a helpful AI assistant for discovering trustworthy NGOs.
-Answer the user's latest question based on the **chat history** and the **provided context**.
-Be conversational and helpful.
-If the context doesn't contain the answer, state that you don't have enough information.
+            """You are PhilanthroBot, a helpful AI assistant for discovering trustworthy NGOs.
+            Answer the user's latest question based on the **chat history** and the **provided context**.
+            Be conversational and helpful.
+            If the context doesn't contain the answer, state that you don't have enough information.
 
-**Chat History:**
-{chat_history}
+            **Chat History:**
+            {chat_history}
 
-**Context from Documents:**
-{context}
+            **Context from Documents:**
+            {context}
 
-**Human:** {input}
-**AI:**"""
+            **Human:** {input}
+            **AI:**"""
         )
         chain = prompt | llm
         context = "\n\n".join([doc.page_content for doc in retrieved_docs])
@@ -411,18 +406,74 @@ if __name__ == "__main__":
 
 
         # Document-level eval set: use PDF filenames as relevant_ids
+        # Document-level eval set: use exact PDF basenames as relevant_ids
         eval_set = [
+            # Pratham (education)
             {
                 "question": "Which NGO focuses on foundational literacy and numeracy in India?",
                 "relevant_ids": ["6_pratham_education_foundation.pdf"],
-                "reference": "Pratham improves foundational literacy and numeracy in India",
+                "reference": "Pratham focuses on foundational literacy and numeracy in India",
             },
             {
-                "question": "Which NGO prioritizes girls' education initiatives?",
+                "question": "Which NGO runs programs for girls' education in India?",
                 "relevant_ids": ["6_pratham_education_foundation.pdf"],
-                "reference": "Pratham runs programs for girls' education",
+                "reference": "Pratham runs programs that support girls' education in India",
+            },
+            {
+                "question": "Which NGO offers youth skilling or employability programs?",
+                "relevant_ids": ["6_pratham_education_foundation.pdf"],
+                "reference": "Pratham offers youth skilling and employability programs",
+            },
+
+            # CRY - Child Rights and You (child rights, education, health)
+            {
+                "question": "Which NGO works on child rights and improving school enrollment?",
+                "relevant_ids": ["2_CRY-child_rights_and_you.pdf"],
+                "reference": "CRY works on child rights and improving school enrollment",
+            },
+            {
+                "question": "Which NGO supports health and nutrition for children in India?",
+                "relevant_ids": ["2_CRY-child_rights_and_you.pdf"],
+                "reference": "CRY supports child health and nutrition programs in India",
+            },
+
+            # HelpAge India (elderly care)
+            {
+                "question": "Which NGO focuses on elderly care services in India?",
+                "relevant_ids": ["5_helpage_india.pdf"],
+                "reference": "HelpAge India focuses on elderly care services",
+            },
+            {
+                "question": "Which NGO provides healthcare support for senior citizens?",
+                "relevant_ids": ["5_helpage_india.pdf"],
+                "reference": "HelpAge India provides healthcare support for senior citizens",
+            },
+
+            # Health For Horizons (health initiatives)
+            {
+                "question": "Which NGO runs rural health outreach programs?",
+                "relevant_ids": ["4_health_for_horizons.pdf"],
+                "reference": "Health For Horizons runs rural health outreach programs",
+            },
+            {
+                "question": "Which NGO supports maternal and child health initiatives?",
+                "relevant_ids": ["4_health_for_horizons.pdf"],
+                "reference": "Health For Horizons supports maternal and child health initiatives",
+            },
+
+            # Global Reforestation Fund (environment, climate)
+            {
+                "question": "Which NGO is focused on tree planting and reforestation?",
+                "relevant_ids": ["3_global_reforestation_fund.pdf"],
+                "reference": "Global Reforestation Fund focuses on tree planting and reforestation",
+            },
+            {
+                "question": "Which NGO supports climate action through forest restoration?",
+                "relevant_ids": ["3_global_reforestation_fund.pdf"],
+                "reference": "Global Reforestation Fund supports climate action via forest restoration",
             },
         ]
+
         id_getter=lambda d: d.metadata.get("doc_id") or os.path.basename(d.metadata.get("source",""))
 
 
@@ -442,6 +493,7 @@ if __name__ == "__main__":
             retriever=retriever,
             dataset=[{"question": ex["question"], "reference": ex["reference"]} for ex in eval_set],
             output_csv="ragas_results.csv",
+            batch_sleep=0.5,
         )
 
         print(df.head())
