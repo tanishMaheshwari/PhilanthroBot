@@ -61,6 +61,16 @@ def build_rag_pipeline():
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
     chunks = text_splitter.split_documents(documents)
 
+    for ch in chunks:
+        src = os.path.basename(ch.metadata.get("source", ""))
+        # Derive a readable NGO title from filename (strip numeric prefixes/underscores)
+        title = os.path.splitext(src)[0]
+        title = title.replace("_", " ")
+        # Optional: special cases mapping if you want nicer names
+        # name_map = {"6 pratham education foundation": "Pratham Education Foundation", ...}
+        # title = name_map.get(title.lower(), title)
+        ch.metadata["ngo_title"] = title
+
     collection_name = "ngos_gemini001"  # keep per-model/dimension collections separate
 
     # Reuse existing DB if present; else build it once
@@ -237,6 +247,11 @@ Standalone question:"""
     return {"retrieved_docs": docs}
 
 
+def fmt(d):
+    src = os.path.basename(d.metadata.get("source", ""))
+    name = d.metadata.get("ngo_title", os.path.splitext(src)[0].replace("_", " "))
+    return f"[NGO: {name} | File: {src}]\n{d.page_content}"
+
 def generate_response_node(state: AgentState):
     """
     Generates a response, adapting whether documents were retrieved or not,
@@ -270,23 +285,32 @@ def generate_response_node(state: AgentState):
     else:
         # If documents were retrieved, perform RAG to answer the question
         print("--- Using RAG Prompt ---")
-        prompt = ChatPromptTemplate.from_template(
-"""You are PhilanthroBot, a helpful AI assistant for discovering trustworthy NGOs.
-Answer the user's latest question based on the **chat history** and the **provided context**.
-Be conversational and helpful.
-If the context doesn't contain the answer, state that you don't have enough information.
+        prompt = ChatPromptTemplate.from_template("""
+            You are **PhilanthroBot**, an intelligent, trustworthy assistant that helps users explore and compare NGOs.
 
-**Chat History:**
-{chat_history}
+            Use the **provided context from NGO documents** and the **chat history** to answer the user's question.
 
-**Context from Documents:**
-{context}
+            Guidelines:
+            - Keep responses concise (3-6 sentences) unless the user asks for detail.
+            - If multiple NGOs are relevant, mention them by name and summarize each briefly.
+            - Use natural language (avoid lists unless necessary).
+            - If the answer isn't clearly in the context, say:
+            "I'm not sure based on the available NGO profiles, but I can help you explore related organizations."
 
-**Human:** {input}
-**AI:**"""
-        )
+            **Chat History:**
+            {chat_history}
+
+            **Context:**
+            {context}
+
+            **User Message:**
+            {input}
+
+            PhilanthroBot:
+            """)
         chain = prompt | llm
-        context = "\n\n".join([doc.page_content for doc in retrieved_docs])
+        # context = "\n\n".join([doc.page_content for doc in retrieved_docs])
+        context = "\n\n".join(fmt(d) for d in retrieved_docs)
         response = chain.invoke({
             "context": context, 
             "chat_history": chat_history, 
